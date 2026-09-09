@@ -68,7 +68,11 @@ class hashtopolis_uploader(plugins.Plugin):
         self.hashlist_name_format = self.options.get(
             "hashlist_name_format", "{hostname}-{essid}-{timestamp}"
         )
-        self.delete_after_upload = bool(self.options.get("delete_after_upload", False))
+        # Split deliberately: deleting the .pcapng changes the handshake count the
+        # Pwnagotchi UI/session-stats derive from the handshakes directory, while
+        # deleting the .22000 (a conversion artifact this plugin generates) does not.
+        self.delete_pcapng_after_upload = bool(self.options.get("delete_pcapng_after_upload", False))
+        self.delete_22000_after_upload = bool(self.options.get("delete_22000_after_upload", False))
         self.min_free_space_mb = int(self.options.get("min_free_space_mb", 50))
         self.retry_count = max(1, int(self.options.get("retry_count", 3)))
         self.timeout_seconds = int(self.options.get("timeout_seconds", 30))
@@ -225,8 +229,10 @@ class hashtopolis_uploader(plugins.Plugin):
                 "uploaded_at": int(time.time()),
             }
             state["failed"].pop(pcap_path, None)
-            if self.delete_after_upload:
-                self._delete_local_copies(pcap_path, hash_path)
+            self._delete_local_copies(
+                pcap_path if self.delete_pcapng_after_upload else None,
+                hash_path if self.delete_22000_after_upload else None,
+            )
         else:
             attempts = state["failed"].get(pcap_path, {"attempts": 0})["attempts"] + 1
             logging.error(f"{TAG}: upload of {pcap_path} failed (attempt {attempts}): {detail}")

@@ -28,10 +28,20 @@ access_group_id = 1
 # {hostname} {essid} {bssid} {timestamp} {filename}
 hashlist_name_format = "{hostname}-{essid}-{timestamp}"
 
-# If true, delete the local .pcapng/.22000 pair after a *confirmed successful*
-# upload. Default is false: keep local copies and only track upload state, so
-# a silent failure can never cause data loss.
-delete_after_upload = false
+# Deletion after a *confirmed successful* upload is split into two knobs.
+# Both default to false: keep everything and only track upload state, so a
+# silent failure can never cause data loss.
+#
+# delete_pcapng_after_upload also removes the file the Pwnagotchi UI/
+# session-stats count handshakes from - leave this false if you want your
+# on-screen "handshakes captured" total to keep reflecting everything you've
+# ever captured, not just what's still on disk.
+delete_pcapng_after_upload = false
+
+# delete_22000_after_upload only removes the .22000 conversion artifact this
+# plugin generates next to the .pcapng - safe to enable independently, since
+# it has no effect on the handshake-count stat.
+delete_22000_after_upload = false
 
 # Skip the whole upload cycle if free space on the handshake_dir filesystem
 # drops below this many MB (defensive - never let this plugin help fill the disk).

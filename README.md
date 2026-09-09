@@ -64,7 +64,8 @@ annotated example. Summary:
 | `access_group_id` | `1` | Hashtopolis access group the new hashlists belong to. |
 | `handshake_dir` | `bettercap.handshakes` from the same config | Where to look for captures. |
 | `hashlist_name_format` | `"{hostname}-{essid}-{timestamp}"` | Template for each hashlist's name. Placeholders: `{hostname} {essid} {bssid} {timestamp} {filename}`. |
-| `delete_after_upload` | `false` | Delete the local `.pcapng`/`.22000` pair only after a *confirmed* successful upload. |
+| `delete_pcapng_after_upload` | `false` | Delete the original `.pcapng` after a *confirmed* successful upload. This also removes it from whatever the Pwnagotchi UI/session-stats count as "handshakes captured" - leave `false` to keep that total accurate. |
+| `delete_22000_after_upload` | `false` | Delete the locally-generated `.22000` conversion file after a *confirmed* successful upload. Independent of the option above; has no effect on the handshake-count stat. |
 | `min_free_space_mb` | `50` | Skip the whole cycle if free space on `handshake_dir`'s filesystem is below this. |
 | `retry_count` | `3` | HTTP upload retries with exponential backoff before giving up for this run. |
 | `timeout_seconds` | `30` | Timeout for both `hcxpcapngtool` and each HTTP request. |
