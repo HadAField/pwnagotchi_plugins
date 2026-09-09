@@ -1,0 +1,61 @@
+# Example config.toml snippet for the hashtopolis_uploader plugin.
+# Merge this into /etc/pwnagotchi/config.toml (or wherever your config lives).
+# See README.md in this repo for the full option reference and how the
+# validation/upload pipeline works.
+
+[main.plugins.hashtopolis_uploader]
+enabled = true
+
+# Base URL of your Hashtopolis server, no trailing slash. The plugin talks to
+# the APIv2 endpoint at <hashtopolis_url>/api/v2/ui/hashlists.
+hashtopolis_url = "https://hashtopolis.example.com"
+
+# A Hashtopolis "API Token" (Settings -> API Tokens in the web UI), used as a
+# Bearer token. Grant it the permHashlistCreate scope; nothing more is needed.
+# This is NOT your Hashtopolis account password.
+api_key = "REPLACE_WITH_YOUR_API_TOKEN"
+
+# Access group the created hashlists will belong to (must be a group your
+# API token's user is a member of). 1 is the default "everyone" group on a
+# fresh Hashtopolis install.
+access_group_id = 1
+
+# Leave unset to use bettercap.handshakes from this same config file.
+# Only set this if you keep handshakes somewhere non-standard.
+# handshake_dir = "/etc/pwnagotchi/handshakes"
+
+# Template for the name of each uploaded hashlist. Available placeholders:
+# {hostname} {essid} {bssid} {timestamp} {filename}
+hashlist_name_format = "{hostname}-{essid}-{timestamp}"
+
+# If true, delete the local .pcapng/.22000 pair after a *confirmed successful*
+# upload. Default is false: keep local copies and only track upload state, so
+# a silent failure can never cause data loss.
+delete_after_upload = false
+
+# Skip the whole upload cycle if free space on the handshake_dir filesystem
+# drops below this many MB (defensive - never let this plugin help fill the disk).
+min_free_space_mb = 50
+
+# How many times to retry a failed HTTP upload (with exponential backoff)
+# before marking a handshake as failed for this run.
+retry_count = 3
+
+# Timeout in seconds for both hcxpcapngtool conversion and each HTTP request.
+timeout_seconds = 30
+
+# Verify the server's TLS certificate. Only set to false for a self-hosted
+# Hashtopolis behind a self-signed cert that you can't otherwise trust -
+# understand this disables protection against MITM on that connection.
+verify_ssl = true
+
+# Minimum seconds between upload cycles, even if on_internet_available fires
+# more often than that (it can, depending on connectivity flapping).
+min_interval_seconds = 300
+
+# Set to true and reload the plugin/config to force every handshake to be
+# re-validated and re-uploaded, ignoring previously recorded state (including
+# handshakes previously marked "invalid" or "failed"). Set back to false once
+# the run you wanted has completed - leaving it true wipes the upload-state
+# file on every config reload.
+force_reupload = false
