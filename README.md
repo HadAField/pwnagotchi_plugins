@@ -5,6 +5,50 @@ Custom Pwnagotchi plugins. Drop the `.py` file(s) directly into your
 `glob("*.py")`, so don't nest them in subfolders) and merge the matching
 `.toml` snippet into `config.toml`.
 
+## already_pwned
+
+Fixes a real gap in pwnagotchi's own "don't re-target an AP I already have a
+handshake for" logic: that check (`Agent._has_handshake()` /
+`_should_interact()`) is driven entirely by an in-memory dict,
+`agent._handshakes`, that starts **empty** on every process start. It's
+populated only by live captures during the current run, plus an optional
+recovery file that's written by exactly one call path
+(`Agent._restart()`) - a plain `systemctl restart`, a crash, `sudo reboot`,
+and even some of pwnagotchi's own internal recovery paths (confirmed in this
+fork's `fix_services.py`, which calls the bare `pwnagotchi.restart()`
+function directly) all skip that save entirely. In practice this means a
+routine restart can make the unit walk back up to an AP it already has a
+complete capture for and attack it again.
+
+This plugin closes that gap without touching any core pwnagotchi file. On
+`on_ready` - once, right before the main loop starts - it scans
+`handshake_dir` for existing `<name>_<bssid>.pcapng` files, and for every
+BSSID not already known this session, inserts a synthetic entry into
+`agent._handshakes` in the same `"sta -> ap"` key format
+`_has_handshake()` expects. Because it re-derives this from the handshakes
+directory (ground truth) on every single startup rather than trusting
+whichever restart path fired, it protects against *all* restart types
+uniformly, not just the ones that happen to save recovery data.
+
+Idempotent and cheap - re-running it is a no-op once every on-disk AP is
+already represented. Filenames that don't match the `<name>_<bssid>.pcapng`
+pattern (a `.pcap`/`.pcapng` without a trailing 12-hex-char BSSID) are
+skipped, not guessed at.
+
+**Known limitation:** `on_ready` fires from a plugin worker thread slightly
+after the main agent thread starts polling live bettercap events (see
+`Agent.start()`), so there's a small startup window where a live capture
+could theoretically land before the disk-seeded state is in place. Narrow
+and non-destructive if it happens - worst case is one AP briefly untracked
+for a few hundred milliseconds at boot, not a wrong result.
+
+### Config reference
+
+| Option | Default | Meaning |
+|---|---|---|
+| `enabled` | - | Standard Pwnagotchi plugin toggle. |
+| `handshake_dir` | `bettercap.handshakes` from the same config | Where to look for existing captures to seed from. |
+
 ## hashtopolis_uploader
 
 Automatically uploads captured WPA/WPA2 handshakes and PMKIDs to a

@@ -1,0 +1,10 @@
+# Example config.toml snippet for the already_pwned plugin.
+# Merge this into /etc/pwnagotchi/config.toml.
+# See README.md in this repo for why this plugin exists.
+
+[main.plugins.already_pwned]
+enabled = true
+
+# Leave unset to use bettercap.handshakes from this same config file.
+# Only set this if you keep handshakes somewhere non-standard.
+# handshake_dir = "/etc/pwnagotchi/handshakes"
