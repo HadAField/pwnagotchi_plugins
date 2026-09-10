@@ -148,20 +148,32 @@ class hashtopolis_uploader(plugins.Plugin):
             "duplicate_essid": self.state.data_field_or("duplicate_essid", default={}),
         }
 
+    def _capture_time(self, path, info):
+        """
+        Best available "when was this actually captured" for a state entry. The live
+        file's mtime (if it still exists - we never delete .pcapng by default) is the
+        most trustworthy source; `captured_at` (recorded at upload time by this plugin)
+        is next; `uploaded_at` (upload-processing order, not true capture order - all
+        that's available for entries from before `captured_at` existed) is a last resort.
+        """
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            pass
+        return info.get("captured_at", info.get("uploaded_at", 0))
+
     def _essid_canonical_map(self, state):
         """
         One canonical (oldest-captured) uploaded path per ESSID. "unknown" is never
         deduped - we can't confirm two "unknown"-ESSID captures are really the same
         network, so treating them as duplicates could wrongly skip/delete real ones.
-        `captured_at` is the pcapng's mtime recorded at upload time; older entries
-        (from before this feature existed) fall back to `uploaded_at`.
         """
         canonical = {}
         for path, info in state["uploaded"].items():
             essid = info.get("essid")
             if not essid or essid == "unknown":
                 continue
-            captured_at = info.get("captured_at", info.get("uploaded_at", 0))
+            captured_at = self._capture_time(path, info)
             current = canonical.get(essid)
             if current is None or captured_at < current[1]:
                 canonical[essid] = (path, captured_at)
@@ -316,7 +328,7 @@ class hashtopolis_uploader(plugins.Plugin):
 
         removed = 0
         for essid, paths in duplicate_groups.items():
-            paths.sort(key=lambda p: state["uploaded"][p].get("captured_at", state["uploaded"][p].get("uploaded_at", 0)))
+            paths.sort(key=lambda p: self._capture_time(p, state["uploaded"][p]))
             canonical_path = paths[0]
             for dup_path in paths[1:]:
                 dup_info = state["uploaded"][dup_path]
