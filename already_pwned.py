@@ -13,35 +13,31 @@ _BSSID_RE = re.compile(r"^(.*)_([0-9a-fA-F]{12})$")
 
 class already_pwned(plugins.Plugin):
     __author__ = "hadfield.seth@gmail.com"
-    __version__ = "1.0.0"
+    __version__ = "1.1.0"
     __license__ = "GPL3"
     __description__ = (
-        "Seeds the agent's in-memory 'already captured' AP list from handshakes "
-        "already on disk at startup. pwnagotchi's own _has_handshake() check only "
-        "knows about APs captured during the current process's uptime (plus a "
-        "recovery file that most restart paths - including a plain "
-        "'systemctl restart' - never write), so without this a restart can make "
-        "it re-target an AP it already has a full capture for."
+        "Makes the agent recognize APs it already has a full capture for on disk, "
+        "even after a restart that doesn't preserve its in-memory session state. "
+        "Does this by patching _has_handshake() to also check a disk-seeded set, "
+        "NOT by inserting into agent._handshakes directly - that dict is also what "
+        "drives the 'handshakes since reboot' counter on the display "
+        "(len(agent._handshakes) in _update_handshakes()), so seeding into it "
+        "directly makes that counter show the lifetime total instead."
     )
 
     def __init__(self):
         self.options = dict()
+        self._seeded_bssids = set()
 
     def on_ready(self, agent):
         try:
-            self._seed(agent)
+            self._load_seeded_bssids(agent)
+            self._patch_has_handshake(agent)
         except Exception:
             # Startup-path plugin code must never take the main loop down with it.
             logging.exception(f"{TAG}: unhandled exception while seeding, skipping.")
 
-    def _seed(self, agent):
-        if not hasattr(agent, "_handshakes") or not hasattr(agent, "_has_handshake"):
-            logging.error(
-                f"{TAG}: agent has no _handshakes/_has_handshake - pwnagotchi's internals "
-                "may have changed since this plugin was written, refusing to guess."
-            )
-            return
-
+    def _load_seeded_bssids(self, agent):
         handshake_dir = self.options.get("handshake_dir") or agent.config()["bettercap"]["handshakes"]
 
         try:
@@ -50,10 +46,7 @@ class already_pwned(plugins.Plugin):
             logging.error(f"{TAG}: cannot list {handshake_dir}: {e}")
             return
 
-        seeded = 0
-        already_known = 0
         unparsed = 0
-
         for filename in files:
             stem = filename.rsplit(".", 1)[0]
             match = _BSSID_RE.match(stem)
@@ -63,21 +56,38 @@ class already_pwned(plugins.Plugin):
 
             bssid_hex = match.group(2).lower()
             bssid = ":".join(bssid_hex[i:i + 2] for i in range(0, 12, 2))
-
-            # _has_handshake() does a case-sensitive substring check against its
-            # stored keys after lowercasing the query, so the seeded key must
-            # already be lowercase to reliably match regardless of what case
-            # bettercap happens to use elsewhere.
-            if agent._has_handshake(bssid):
-                already_known += 1
-                continue
-
-            key = f"seeded -> {bssid}"
-            agent._handshakes[key] = {"seeded": True, "source": filename, "bssid": bssid}
-            seeded += 1
+            self._seeded_bssids.add(bssid)
 
         logging.info(
-            f"{TAG}: seeded {seeded} already-captured AP(s) from {handshake_dir} "
-            f"({already_known} already known this session, {unparsed} filename(s) "
-            "didn't match the <name>_<bssid>.pcapng pattern and were skipped)."
+            f"{TAG}: loaded {len(self._seeded_bssids)} already-captured BSSID(s) from "
+            f"{handshake_dir} ({unparsed} filename(s) didn't match the "
+            "<name>_<bssid>.pcapng pattern and were skipped)."
+        )
+
+    def _patch_has_handshake(self, agent):
+        if getattr(agent, "_already_pwned_patched", False):
+            return  # e.g. a second on_ready somehow firing - don't double-wrap
+
+        if not hasattr(agent, "_has_handshake"):
+            logging.error(
+                f"{TAG}: agent has no _has_handshake - pwnagotchi's internals may have "
+                "changed since this plugin was written, refusing to guess."
+            )
+            return
+
+        original_has_handshake = agent._has_handshake  # bound method, 'self' already captured
+        seeded = self._seeded_bssids
+
+        def patched_has_handshake(bssid):
+            return bssid.lower() in seeded or original_has_handshake(bssid)
+
+        # Assigning a plain function as an instance attribute shadows the class
+        # method for this agent only, without touching agent._handshakes (and
+        # therefore without touching the since-reboot counter that reads it).
+        agent._has_handshake = patched_has_handshake
+        agent._already_pwned_patched = True
+
+        logging.info(
+            f"{TAG}: patched _has_handshake() to also recognize {len(seeded)} "
+            "disk-seeded BSSID(s)."
         )

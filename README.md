@@ -20,20 +20,31 @@ function directly) all skip that save entirely. In practice this means a
 routine restart can make the unit walk back up to an AP it already has a
 complete capture for and attack it again.
 
-This plugin closes that gap without touching any core pwnagotchi file. On
-`on_ready` - once, right before the main loop starts - it scans
-`handshake_dir` for existing `<name>_<bssid>.pcapng` files, and for every
-BSSID not already known this session, inserts a synthetic entry into
-`agent._handshakes` in the same `"sta -> ap"` key format
-`_has_handshake()` expects. Because it re-derives this from the handshakes
-directory (ground truth) on every single startup rather than trusting
-whichever restart path fired, it protects against *all* restart types
-uniformly, not just the ones that happen to save recovery data.
+This plugin closes that gap without touching any core pwnagotchi file - and
+**without inserting into `agent._handshakes` directly**, which is where an
+earlier version of this plugin got it wrong. That dict does double duty in
+core: it's both the dedup memory `_has_handshake()` reads, *and* the source
+of the left-hand "handshakes since reboot" counter on the display
+(`len(agent._handshakes)` in `Agent._update_handshakes()`). Seeding disk
+history into it directly made that counter show something closer to the
+lifetime total instead of a real since-reboot count.
 
-Idempotent and cheap - re-running it is a no-op once every on-disk AP is
-already represented. Filenames that don't match the `<name>_<bssid>.pcapng`
-pattern (a `.pcap`/`.pcapng` without a trailing 12-hex-char BSSID) are
-skipped, not guessed at.
+Instead, on `on_ready` - once, right before the main loop starts - it scans
+`handshake_dir` for existing `<name>_<bssid>.pcapng` files into its own,
+separate set, then patches `agent._has_handshake()` (an instance-level
+shadow, not a core file edit) to check that set in addition to whatever's
+genuinely in `agent._handshakes`. Dedup correctly recognizes disk history;
+`agent._handshakes` itself is never touched, so the since-reboot counter
+only ever reflects handshakes actually captured in the current session, same
+as before this plugin existed. Because the disk scan re-derives from the
+handshakes directory (ground truth) on every single startup rather than
+trusting whichever restart path fired, it protects against *all* restart
+types uniformly, not just the ones that happen to save recovery data.
+
+Idempotent and cheap - the patch guards against being applied twice, and
+re-scanning the directory is harmless. Filenames that don't match the
+`<name>_<bssid>.pcapng` pattern (a `.pcap`/`.pcapng` without a trailing
+12-hex-char BSSID) are skipped, not guessed at.
 
 **Known limitation:** `on_ready` fires from a plugin worker thread slightly
 after the main agent thread starts polling live bettercap events (see
