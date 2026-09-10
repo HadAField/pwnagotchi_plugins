@@ -68,10 +68,11 @@ class hashtopolis_uploader(plugins.Plugin):
         self.hashlist_name_format = self.options.get(
             "hashlist_name_format", "{hostname}-{essid}-{timestamp}"
         )
-        # Split deliberately: deleting the .pcapng changes the handshake count the
-        # Pwnagotchi UI/session-stats derive from the handshakes directory, while
-        # deleting the .22000 (a conversion artifact this plugin generates) does not.
-        self.delete_pcapng_after_upload = bool(self.options.get("delete_pcapng_after_upload", False))
+        # Only the .22000 conversion artifact this plugin generates is ever
+        # eligible for deletion here - the .pcapng itself is never removed by
+        # this plugin. already_pwned.py's disk-seeded dedup depends on that
+        # file continuing to exist across restarts; deleting it after upload
+        # would silently undo that plugin's entire purpose.
         self.delete_22000_after_upload = bool(self.options.get("delete_22000_after_upload", False))
         self.min_free_space_mb = int(self.options.get("min_free_space_mb", 50))
         self.retry_count = max(1, int(self.options.get("retry_count", 3)))
@@ -300,10 +301,8 @@ class hashtopolis_uploader(plugins.Plugin):
             state["failed"].pop(pcap_path, None)
             if essid != "unknown":
                 essid_map[essid] = pcap_path
-            self._delete_local_copies(
-                pcap_path if self.delete_pcapng_after_upload else None,
-                hash_path if self.delete_22000_after_upload else None,
-            )
+            if self.delete_22000_after_upload:
+                self._delete_hash_file(hash_path)
         else:
             attempts = state["failed"].get(pcap_path, {"attempts": 0})["attempts"] + 1
             logging.error(f"{TAG}: upload of {pcap_path} failed (attempt {attempts}): {detail}")
@@ -544,10 +543,9 @@ class hashtopolis_uploader(plugins.Plugin):
 
         return False, last_error
 
-    def _delete_local_copies(self, pcap_path, hash_path):
-        for path in (pcap_path, hash_path):
-            try:
-                if path and os.path.exists(path):
-                    os.remove(path)
-            except OSError as e:
-                logging.warning(f"{TAG}: could not delete {path} after upload: {e}")
+    def _delete_hash_file(self, hash_path):
+        try:
+            if hash_path and os.path.exists(hash_path):
+                os.remove(hash_path)
+        except OSError as e:
+            logging.warning(f"{TAG}: could not delete {hash_path} after upload: {e}")

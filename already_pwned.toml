@@ -8,3 +8,17 @@ enabled = true
 # Leave unset to use bettercap.handshakes from this same config file.
 # Only set this if you keep handshakes somewhere non-standard.
 # handshake_dir = "/etc/pwnagotchi/handshakes"
+
+# Require the same real-key-material check hashtopolis_uploader.py uses
+# (magic bytes + a genuine hcxpcapngtool pass) before trusting a .pcapng on
+# disk as "already captured". Set false to restore old filename-only seeding.
+validate_handshakes = true
+
+# Per-file timeout (seconds) for the hcxpcapngtool validation pass.
+validation_timeout_seconds = 15
+
+# When a capture fails validation (empty file, bad magic, or hcxpcapngtool
+# finds no crackable EAPOL/PMKID material), delete the .pcapng so that AP
+# stays eligible for a real capture attempt instead of being silently
+# blocked forever. Only takes effect when validate_handshakes = true.
+delete_invalid_handshakes = true

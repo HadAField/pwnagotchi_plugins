@@ -28,19 +28,17 @@ access_group_id = 1
 # {hostname} {essid} {bssid} {timestamp} {filename}
 hashlist_name_format = "{hostname}-{essid}-{timestamp}"
 
-# Deletion after a *confirmed successful* upload is split into two knobs.
-# Both default to false: keep everything and only track upload state, so a
-# silent failure can never cause data loss.
+# Deletes the .22000 conversion artifact this plugin generates next to the
+# .pcapng after a *confirmed successful* upload. Safe to enable - this
+# plugin's own dedup state (path + ESSID) is persisted in
+# .hashtopolis_uploads at upload time and never depends on the .22000 file
+# continuing to exist.
 #
-# delete_pcapng_after_upload also removes the file the Pwnagotchi UI/
-# session-stats count handshakes from - leave this false if you want your
-# on-screen "handshakes captured" total to keep reflecting everything you've
-# ever captured, not just what's still on disk.
-delete_pcapng_after_upload = false
-
-# delete_22000_after_upload only removes the .22000 conversion artifact this
-# plugin generates next to the .pcapng - safe to enable independently, since
-# it has no effect on the handshake-count stat.
+# The .pcapng itself is intentionally never deleted by this plugin:
+# already_pwned.py's disk-seeded "already captured" memory depends on that
+# file existing across restarts, and deleting it here would silently break
+# that plugin's entire purpose. There is deliberately no
+# delete_pcapng_after_upload option.
 delete_22000_after_upload = false
 
 # Skip the whole upload cycle if free space on the handshake_dir filesystem
