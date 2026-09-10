@@ -69,3 +69,18 @@ min_interval_seconds = 300
 # the run you wanted has completed - leaving it true wipes the upload-state
 # file on every config reload.
 force_reupload = false
+
+# Skip uploading a handshake if its SSID already has an uploaded hashlist -
+# the oldest capture of a given SSID is kept as canonical, later re-captures
+# (dual-band APs sharing an SSID across BSSIDs, or just walking past the same
+# network again) are recorded in the state file's "duplicate_essid" section
+# instead of creating redundant hashlists. On by default.
+dedupe_essid = true
+
+# One-time, opt-in cleanup for hashlists uploaded *before* dedupe_essid existed:
+# groups your already-uploaded hashlists by SSID, keeps the oldest capture, and
+# DELETEs the rest directly from the Hashtopolis server (requires the API token
+# to also carry permHashlistDelete). This is a real, immediate change to server
+# data - off by default. Safe to leave on afterward (idempotent, nothing left
+# to clean up once duplicates are gone), but off is the safer default.
+cleanup_existing_essid_duplicates = false

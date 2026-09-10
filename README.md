@@ -44,7 +44,8 @@ plugins (directory-scan-on-internet-available, `hcxpcapngtool` conversion,
 - A running, reachable Hashtopolis server (APIv2).
 - A Hashtopolis **API Token** (Settings -> API Tokens in the web UI) scoped
   with at least `permHashlistCreate`. This is a long-lived JWT string, not
-  your account password - use it as-is for `api_key`.
+  your account password - use it as-is for `api_key`. Add `permHashlistDelete`
+  too if you plan to use `cleanup_existing_essid_duplicates` (see below).
 - The token's user must be a member of the `access_group_id` you configure
   (group `1` is the default "everyone" group on a fresh install).
 - `hcxpcapngtool` installed and on `PATH` (it already is on stock Pwnagotchi
@@ -72,6 +73,8 @@ annotated example. Summary:
 | `verify_ssl` | `true` | Verify the server's TLS cert. Set `false` only for a trusted self-signed cert. |
 | `min_interval_seconds` | `300` | Minimum gap between upload cycles, since `on_internet_available` can fire repeatedly. |
 | `force_reupload` | `false` | Wipes the upload-state file on every config reload while `true`. Use to force a full re-scan, then set back to `false`. |
+| `dedupe_essid` | `true` | Skip uploading a handshake whose SSID already has an uploaded hashlist; keeps the oldest capture as canonical. See "SSID deduplication" below. |
+| `cleanup_existing_essid_duplicates` | `false` | One-time, opt-in: DELETEs already-uploaded duplicate-SSID hashlists from the server, keeping the oldest capture. Real, immediate server-side change - see below. |
 
 **Manual resend of a single handshake:** open the JSON state file at
 `<handshake_dir>/.hashtopolis_uploads` and delete that file's entry from
@@ -109,6 +112,49 @@ subsequent cycle indefinitely, until it succeeds or you intervene (whitelist
 it, or fix whatever the logged error says is wrong server-side). Losing a
 real handshake to a transient server error would be worse than the wasted
 bandwidth of retrying every `min_interval_seconds`.
+
+### SSID deduplication
+
+A single physical network commonly ends up as more than one `.pcapng` file:
+the Pwnagotchi walks past the same AP again on a later session, or a dual-band
+router broadcasts the same SSID from two different BSSIDs (2.4GHz/5GHz) that
+share one PSK. Without dedup, each of those becomes its own hashlist on
+Hashtopolis - same password, wasted cracking effort, more clutter.
+
+With `dedupe_essid = true` (the default), the *first* handshake seen for a
+given SSID becomes canonical and gets uploaded normally; every later capture
+of that same SSID is skipped and recorded in the state file's
+`duplicate_essid` section (with the path of the canonical capture and its
+hashlist ID) instead of creating a second hashlist. "First" means **oldest by
+actual capture time** (the `.pcapng`'s mtime), not upload order - within a
+single cycle, pending handshakes are processed oldest-first so this holds
+even when several duplicates of the same SSID are discovered at once.
+Deliberately simple: since only handshakes that already passed the "real key
+material" validation above ever reach `uploaded`, every candidate for the
+canonical slot is already known-valid, so there's no need to rank captures
+against each other by quality - oldest-first is enough. `essid == "unknown"`
+(ESSID couldn't be parsed from the hash line) is never deduped, since two
+"unknown" captures can't be confirmed to be the same network.
+
+This uses SSID text as the dedup key, not SSID+BSSID - deliberately, so the
+dual-band-AP case above collapses correctly. The tradeoff: a generic default
+SSID (e.g. two unrelated "NETGEAR44" routers at different locations, or an
+enterprise deployment broadcasting one SSID from many independent APs with
+different passwords) would incorrectly collapse to one hashlist too. If your
+environment has that pattern, set `dedupe_essid = false`.
+
+**Cleaning up hashlists uploaded before this feature existed:** set
+`cleanup_existing_essid_duplicates = true` and let a cycle run. This groups
+everything already in the state file's `uploaded` section by SSID, keeps the
+oldest capture per SSID, and issues a `DELETE` against the Hashtopolis server
+for every other hashlist in that group - moving them into `duplicate_essid`
+locally to match. This is a real, immediate, mostly-irreversible change to
+data already on your server (it needs `permHashlistDelete` on the API token,
+in addition to `permHashlistCreate`), so it defaults to `false` and only ever
+touches hashlists this plugin's own state file has a `hashlist_id` for. A
+failed `DELETE` (e.g. the token lacks the delete scope) leaves that entry in
+`uploaded` untouched and retries on the next cycle rather than losing track
+of it.
 
 ### Design decision: `.pcapng` vs `.22000`, and why
 

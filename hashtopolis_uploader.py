@@ -79,6 +79,18 @@ class hashtopolis_uploader(plugins.Plugin):
         self.verify_ssl = bool(self.options.get("verify_ssl", True))
         self.min_interval_seconds = int(self.options.get("min_interval_seconds", 300))
         self.force_reupload = bool(self.options.get("force_reupload", False))
+        # Prevent uploading a second hashlist for an SSID that already has one - dual-band/
+        # mesh APs commonly broadcast the same SSID from multiple BSSIDs sharing one PSK,
+        # and the same AP gets re-captured across sessions regardless. Keeps the oldest
+        # capture as canonical; every later capture of the same SSID is a duplicate.
+        self.dedupe_essid = bool(self.options.get("dedupe_essid", True))
+        # One-time, opt-in, destructive: deletes the Hashtopolis-side hashlists for any
+        # SSID duplicates that were already uploaded before this feature existed. Defaults
+        # off since it issues real DELETE calls against the server; safe to leave on since
+        # it's idempotent (nothing left to clean up after the first successful pass).
+        self.cleanup_existing_essid_duplicates = bool(
+            self.options.get("cleanup_existing_essid_duplicates", False)
+        )
 
         self.handshake_dir = self.options.get("handshake_dir") or config["bettercap"]["handshakes"]
         self.whitelist = config["main"].get("whitelist", [])
@@ -99,7 +111,7 @@ class hashtopolis_uploader(plugins.Plugin):
                 "every handshake will be re-validated and re-uploaded. "
                 "Set force_reupload back to false in config.toml once this run completes."
             )
-            self._save_state({"uploaded": {}, "invalid": {}, "failed": {}})
+            self._save_state({"uploaded": {}, "invalid": {}, "failed": {}, "duplicate_essid": {}})
 
         if not self.verify_ssl:
             logging.warning(f"{TAG}: verify_ssl is disabled, TLS certificate errors will be ignored.")
@@ -133,7 +145,27 @@ class hashtopolis_uploader(plugins.Plugin):
             "uploaded": self.state.data_field_or("uploaded", default={}),
             "invalid": self.state.data_field_or("invalid", default={}),
             "failed": self.state.data_field_or("failed", default={}),
+            "duplicate_essid": self.state.data_field_or("duplicate_essid", default={}),
         }
+
+    def _essid_canonical_map(self, state):
+        """
+        One canonical (oldest-captured) uploaded path per ESSID. "unknown" is never
+        deduped - we can't confirm two "unknown"-ESSID captures are really the same
+        network, so treating them as duplicates could wrongly skip/delete real ones.
+        `captured_at` is the pcapng's mtime recorded at upload time; older entries
+        (from before this feature existed) fall back to `uploaded_at`.
+        """
+        canonical = {}
+        for path, info in state["uploaded"].items():
+            essid = info.get("essid")
+            if not essid or essid == "unknown":
+                continue
+            captured_at = info.get("captured_at", info.get("uploaded_at", 0))
+            current = canonical.get(essid)
+            if current is None or captured_at < current[1]:
+                canonical[essid] = (path, captured_at)
+        return {essid: path for essid, (path, _) in canonical.items()}
 
     def _save_state(self, data):
         self.state.update(data=data)
@@ -156,6 +188,9 @@ class hashtopolis_uploader(plugins.Plugin):
 
         state = self._load_state()
 
+        if self.cleanup_existing_essid_duplicates:
+            self._dedupe_existing_hashlists(state)
+
         pcap_files = [
             f for f in os.listdir(self.handshake_dir)
             if f.endswith(".pcapng") or f.endswith(".pcap")
@@ -172,9 +207,14 @@ class hashtopolis_uploader(plugins.Plugin):
             logging.debug(f"{TAG}: no new handshakes to process.")
             return
 
+        # Oldest capture first, so within a single cycle the first handshake seen for a
+        # given SSID is the one that becomes canonical - matches "keep the oldest capture".
+        pending.sort(key=lambda p: os.path.getmtime(p))
+
         logging.info(f"{TAG}: found {len(pending)} new handshake(s) to validate and upload.")
         display = agent.view()
         uploaded_count = 0
+        essid_map = self._essid_canonical_map(state)
 
         for idx, pcap_path in enumerate(pending):
             display.on_uploading(f"Hashtopolis ({idx + 1}/{len(pending)})")
@@ -185,7 +225,7 @@ class hashtopolis_uploader(plugins.Plugin):
             # attempt, never how many cycles we keep trying. Losing a real handshake
             # to a transient server error is worse than a wasted retry every few minutes.
             try:
-                self._process_one(pcap_path, state)
+                self._process_one(pcap_path, state, essid_map)
                 if pcap_path in state["uploaded"]:
                     uploaded_count += 1
             except Exception:
@@ -197,10 +237,11 @@ class hashtopolis_uploader(plugins.Plugin):
         if uploaded_count:
             logging.info(f"{TAG}: uploaded {uploaded_count}/{len(pending)} new handshake(s).")
 
-    def _process_one(self, pcap_path, state):
+    def _process_one(self, pcap_path, state, essid_map):
         """
-        Validate, convert, and upload a single capture. Mutates `state` in place;
-        the caller is responsible for persisting it.
+        Validate, convert, and upload a single capture. Mutates `state` (and
+        `essid_map`, so later files in the same cycle see this one as canonical)
+        in place; the caller is responsible for persisting `state`.
         """
         if not self._sanitize_capture(pcap_path):
             state["invalid"][pcap_path] = "not a valid/non-empty pcap(ng) capture"
@@ -215,6 +256,21 @@ class hashtopolis_uploader(plugins.Plugin):
             return
 
         essid, bssid = self._extract_essid_bssid(hash_lines[0])
+
+        if self.dedupe_essid and essid != "unknown" and essid in essid_map:
+            canonical_path = essid_map[essid]
+            logging.info(
+                f"{TAG}: {pcap_path} has the same SSID '{essid}' as already-uploaded "
+                f"{canonical_path}, skipping as a duplicate."
+            )
+            state["duplicate_essid"][pcap_path] = {
+                "essid": essid,
+                "bssid": bssid,
+                "canonical_path": canonical_path,
+                "canonical_hashlist_id": state["uploaded"].get(canonical_path, {}).get("hashlist_id"),
+            }
+            return
+
         hashlist_name = self._format_hashlist_name(essid, bssid, pcap_path)
 
         logging.info(f"{TAG}: uploading {pcap_path} as hashlist '{hashlist_name}' ({len(hash_lines)} line(s)).")
@@ -227,8 +283,11 @@ class hashtopolis_uploader(plugins.Plugin):
                 "essid": essid,
                 "bssid": bssid,
                 "uploaded_at": int(time.time()),
+                "captured_at": os.path.getmtime(pcap_path),
             }
             state["failed"].pop(pcap_path, None)
+            if essid != "unknown":
+                essid_map[essid] = pcap_path
             self._delete_local_copies(
                 pcap_path if self.delete_pcapng_after_upload else None,
                 hash_path if self.delete_22000_after_upload else None,
@@ -237,6 +296,54 @@ class hashtopolis_uploader(plugins.Plugin):
             attempts = state["failed"].get(pcap_path, {"attempts": 0})["attempts"] + 1
             logging.error(f"{TAG}: upload of {pcap_path} failed (attempt {attempts}): {detail}")
             state["failed"][pcap_path] = {"attempts": attempts, "last_error": str(detail)}
+
+    def _dedupe_existing_hashlists(self, state):
+        """
+        One-time retroactive cleanup: for every SSID with more than one already-uploaded
+        hashlist, keep the oldest capture and DELETE the rest from the Hashtopolis server.
+        Only ever removes entries this plugin itself created a hashlist_id for.
+        """
+        by_essid = {}
+        for path, info in state["uploaded"].items():
+            essid = info.get("essid")
+            if not essid or essid == "unknown":
+                continue
+            by_essid.setdefault(essid, []).append(path)
+
+        duplicate_groups = {essid: paths for essid, paths in by_essid.items() if len(paths) > 1}
+        if not duplicate_groups:
+            return
+
+        removed = 0
+        for essid, paths in duplicate_groups.items():
+            paths.sort(key=lambda p: state["uploaded"][p].get("captured_at", state["uploaded"][p].get("uploaded_at", 0)))
+            canonical_path = paths[0]
+            for dup_path in paths[1:]:
+                dup_info = state["uploaded"][dup_path]
+                hashlist_id = dup_info.get("hashlist_id")
+                ok, detail = self._delete_hashlist(hashlist_id) if hashlist_id is not None else (False, "no hashlist_id recorded")
+                if ok:
+                    logging.info(
+                        f"{TAG}: deleted duplicate-SSID hashlist {hashlist_id} for '{essid}' "
+                        f"({dup_path}), keeping {canonical_path}."
+                    )
+                    state["duplicate_essid"][dup_path] = {
+                        "essid": essid,
+                        "bssid": dup_info.get("bssid"),
+                        "canonical_path": canonical_path,
+                        "canonical_hashlist_id": state["uploaded"][canonical_path].get("hashlist_id"),
+                    }
+                    del state["uploaded"][dup_path]
+                    removed += 1
+                else:
+                    logging.error(
+                        f"{TAG}: could not delete duplicate-SSID hashlist {hashlist_id} for "
+                        f"'{essid}' ({dup_path}): {detail}. Leaving it in place, will retry next cycle."
+                    )
+
+        if removed:
+            logging.info(f"{TAG}: SSID dedup cleanup removed {removed} duplicate hashlist(s) from the server.")
+            self._save_state(state)
 
     # -- sanitization -------------------------------------------------------
 
@@ -387,6 +494,38 @@ class hashtopolis_uploader(plugins.Plugin):
                         return True, None
                 last_error = f"HTTP {response.status_code}: {response.text[:500]}"
                 logging.warning(f"{TAG}: attempt {attempt}/{self.retry_count} rejected - {last_error}")
+
+            if attempt < self.retry_count:
+                time.sleep(min(2 ** attempt, 30))
+
+        return False, last_error
+
+    def _delete_hashlist(self, hashlist_id):
+        """
+        DELETE an existing hashlist via the Hashtopolis APIv2. Used only for retroactive
+        SSID-duplicate cleanup (cleanup_existing_essid_duplicates). Requires the API
+        token to also carry permHashlistDelete, not just permHashlistCreate.
+        """
+        url = f"{self.hashtopolis_url}/api/v2/ui/hashlists/{hashlist_id}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        last_error = "unknown error"
+        for attempt in range(1, self.retry_count + 1):
+            try:
+                response = requests.delete(
+                    url,
+                    headers=headers,
+                    timeout=self.timeout_seconds,
+                    verify=self.verify_ssl,
+                )
+            except requests.exceptions.RequestException as e:
+                last_error = str(e)
+                logging.warning(f"{TAG}: attempt {attempt}/{self.retry_count} network error deleting hashlist {hashlist_id}: {e}")
+            else:
+                if response.status_code == 204:
+                    return True, None
+                last_error = f"HTTP {response.status_code}: {response.text[:500]}"
+                logging.warning(f"{TAG}: attempt {attempt}/{self.retry_count} rejected deleting hashlist {hashlist_id} - {last_error}")
 
             if attempt < self.retry_count:
                 time.sleep(min(2 ** attempt, 30))
