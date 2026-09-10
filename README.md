@@ -41,17 +41,65 @@ handshakes directory (ground truth) on every single startup rather than
 trusting whichever restart path fired, it protects against *all* restart
 types uniformly, not just the ones that happen to save recovery data.
 
-Idempotent and cheap - the patch guards against being applied twice, and
-re-scanning the directory is harmless. Filenames that don't match the
-`<name>_<bssid>.pcapng` pattern (a `.pcap`/`.pcapng` without a trailing
-12-hex-char BSSID) are skipped, not guessed at.
+Idempotent - the patch guards against being applied twice, and re-scanning
+the directory is harmless. Filenames that don't match the
+`<name>_<bssid>.pcapng` pattern (missing a trailing 12-hex-char BSSID) are
+skipped, not guessed at. Only `.pcapng` is scanned; `.pcap` is deprecated and
+no longer written by bettercap/pwnagotchi.
 
-**Known limitation:** `on_ready` fires from a plugin worker thread slightly
-after the main agent thread starts polling live bettercap events (see
-`Agent.start()`), so there's a small startup window where a live capture
-could theoretically land before the disk-seeded state is in place. Narrow
-and non-destructive if it happens - worst case is one AP briefly untracked
-for a few hundred milliseconds at boot, not a wrong result.
+### Handshake validation and cleanup
+
+A pure filename match has a real failure mode: bettercap/pwnagotchi
+sometimes writes an empty (0-byte) or otherwise invalid `.pcapng` - a
+beacon/probe-only capture, or a partial EAPOL exchange with no actual key
+material. Before this existed, a file like that sitting in `handshake_dir`
+got its BSSID seeded as "already captured" on every boot forever,
+permanently blocking that AP from ever being attacked again even though
+there was never a usable handshake for it - the exact restart-survives-
+nothing case this plugin exists to close, just working against itself.
+
+With `validate_handshakes = true` (the default), each filename match must
+also pass the same real-key-material check
+[`hashtopolis_uploader.py`](hashtopolis_uploader.py) uses: non-empty file,
+correct pcapng magic bytes, then a genuine `hcxpcapngtool` pass confirming
+non-empty `.22000` output. That `.22000` is scratch and deleted immediately
+either way - the confirmed-valid result is recorded instead in this
+plugin's own tiny state file, `<handshake_dir>/.already_pwned_validated`
+(path -> mtime), so a file already confirmed valid on an earlier boot
+doesn't cost another `hcxpcapngtool` call unless it changes. This
+deliberately doesn't reuse `hashtopolis_uploader.py`'s `.22000` as a shared
+cache, since that plugin may delete its own `.22000` after a successful
+upload (`delete_22000_after_upload`) - the two plugins' disk-hygiene
+choices are intentionally decoupled.
+
+A file that fails validation is, with `delete_invalid_handshakes = true`
+(the default), deleted outright - not just skipped - so the AP goes back to
+being a normal, attackable target instead of silently blocked forever.
+Anything `hcxpcapngtool` can't confirm one way or the other (a timeout, the
+binary erroring) counts as *not valid, but also not deleted*: this plugin
+only ever removes a capture a completed run actually confirmed empty, never
+one it merely failed to check. If `hcxpcapngtool` isn't on `PATH` at all,
+validation is skipped for that boot (with a warning) and the plugin falls
+back to filename-only seeding rather than silently seeding nothing.
+
+Set `validate_handshakes = false` to disable all of this and go back to
+pure filename-based seeding (pre-2.0.0 behavior).
+
+**Known limitations:**
+
+- `on_ready` fires from a plugin worker thread slightly after the main
+  agent thread starts polling live bettercap events (see `Agent.start()`),
+  so there's a small startup window where a live capture could
+  theoretically land before the disk-seeded state is in place. Narrow and
+  non-destructive if it happens - worst case is one AP briefly untracked
+  for a few hundred milliseconds at boot, not a wrong result.
+- With `validate_handshakes = true`, that window isn't fixed-size anymore:
+  a boot with many not-yet-cached files (e.g. the first boot after
+  upgrading to 2.0.0, or a device that's captured a lot with
+  `hashtopolis_uploader` disabled) spends real time running
+  `hcxpcapngtool` once per uncached file before `on_ready` finishes.
+  Subsequent boots are fast again once the state cache is populated, since
+  only new or changed files get re-checked.
 
 ### Config reference
 
@@ -59,6 +107,9 @@ for a few hundred milliseconds at boot, not a wrong result.
 |---|---|---|
 | `enabled` | - | Standard Pwnagotchi plugin toggle. |
 | `handshake_dir` | `bettercap.handshakes` from the same config | Where to look for existing captures to seed from. |
+| `validate_handshakes` | `true` | Require the same real-key-material check `hashtopolis_uploader.py` uses (magic bytes + `hcxpcapngtool`) before trusting a file. `false` restores old filename-only seeding. |
+| `validation_timeout_seconds` | `15` | Per-file timeout for the `hcxpcapngtool` validation pass. |
+| `delete_invalid_handshakes` | `true` | Delete a `.pcapng` that fails validation so its AP stays eligible for recapture. Only takes effect when `validate_handshakes = true`. |
 
 ## hashtopolis_uploader
 
@@ -120,8 +171,7 @@ annotated example. Summary:
 | `access_group_id` | `1` | Hashtopolis access group the new hashlists belong to. |
 | `handshake_dir` | `bettercap.handshakes` from the same config | Where to look for captures. |
 | `hashlist_name_format` | `"{hostname}-{essid}-{timestamp}"` | Template for each hashlist's name. Placeholders: `{hostname} {essid} {bssid} {timestamp} {filename}`. |
-| `delete_pcapng_after_upload` | `false` | Delete the original `.pcapng` after a *confirmed* successful upload. This also removes it from whatever the Pwnagotchi UI/session-stats count as "handshakes captured" - leave `false` to keep that total accurate. |
-| `delete_22000_after_upload` | `false` | Delete the locally-generated `.22000` conversion file after a *confirmed* successful upload. Independent of the option above; has no effect on the handshake-count stat. |
+| `delete_22000_after_upload` | `false` | Delete the locally-generated `.22000` conversion file after a *confirmed* successful upload. Safe to enable - dedup state (path + ESSID) is persisted to `.hashtopolis_uploads` at upload time and never depends on the `.22000` file continuing to exist. There is deliberately no `delete_pcapng_after_upload` option: the `.pcapng` itself is never deleted by this plugin, since [already_pwned](#already_pwned)'s disk-seeded dedup depends on that file surviving restarts. |
 | `min_free_space_mb` | `50` | Skip the whole cycle if free space on `handshake_dir`'s filesystem is below this. |
 | `retry_count` | `3` | HTTP upload retries with exponential backoff before giving up for this run. |
 | `timeout_seconds` | `30` | Timeout for both `hcxpcapngtool` and each HTTP request. |
